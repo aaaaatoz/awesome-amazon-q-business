@@ -1,0 +1,200 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  IdentityCenterName:
+    Type: String
+    Description: Name of the SSO Permission Set
+    Default: qbusiness-instance
+
+Resources:
+  SSOInstance:
+    Type: AWS::SSO::Instance
+    Properties:
+      Name: !Ref IdentityCenterName
+
+  SSOGroup:
+    Type: AWS::IdentityStore::Group
+    Properties:
+      DisplayName: "Q Business Group"
+      IdentityStoreId: !GetAtt SSOInstance.IdentityStoreId
+
+  # QBusiness ServiceLinked role
+  QBusinessSLR:
+    Type: AWS::IAM::ServiceLinkedRole
+    Properties:
+      AWSServiceName: qbusiness.amazonaws.com
+      Description: Service Linked Role for Q Business
+
+  # Q Business Application
+  QBusinessApp:
+    Type: AWS::QBusiness::Application
+    Properties:
+      DisplayName: "AmazonQBusinessApplication"
+      RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/qbusiness.amazonaws.com/AWSServiceRoleForQBusiness
+      IdentityCenterInstanceArn: !Ref SSOInstance
+      IdentityType: AWS_IAM_IDC
+      AttachmentsConfiguration:
+        AttachmentsControlMode: ENABLED
+      QAppsConfiguration:
+        QAppsControlMode: ENABLED
+      PersonalizationConfiguration:
+        PersonalizationControlMode: ENABLED
+    DependsOn:
+      - QBusinessSLR
+
+  ApplicationAssignment:
+    Type: AWS::SSO::ApplicationAssignment
+    Properties:
+      ApplicationArn: !GetAtt QBusinessApp.IdentityCenterApplicationArn
+      PrincipalId: !GetAtt SSOGroup.GroupId
+      PrincipalType: GROUP
+    DependsOn:
+      - QBusinessApp
+      - SSOGroup
+
+  # create role for web experience
+  QBusinessWebExperienceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: QBusiness-WebExperience-demo
+      Description: Amazon Q Business Web Experience Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: QBusinessTrustPolicy
+            Effect: Allow
+            Principal:
+              Service: application.qbusiness.amazonaws.com
+            Action:
+              - sts:AssumeRole
+              - sts:SetContext
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnEquals:
+                aws:SourceArn: !Sub 'arn:aws:qbusiness:${AWS::Region}:${AWS::AccountId}:application/${QBusinessApp}'
+
+  QBusinessWebExperiencePolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: QBusinessWebExperiencePolicy
+      Roles:
+        - !Ref QBusinessWebExperienceRole
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: QBusinessConversationPermissions
+            Effect: Allow
+            Action:
+              - qbusiness:Chat
+              - qbusiness:ChatSync
+              - qbusiness:ListMessages
+              - qbusiness:ListConversations
+              - qbusiness:PutFeedback
+              - qbusiness:DeleteConversation
+              - qbusiness:GetWebExperience
+              - qbusiness:GetApplication
+              - qbusiness:ListPlugins
+              - qbusiness:ListPluginActions
+              - qbusiness:GetChatControlsConfiguration
+              - qbusiness:ListRetrievers
+              - qbusiness:ListAttachments
+              - qbusiness:GetMedia
+            Resource: !Sub 'arn:aws:qbusiness:${AWS::Region}:${AWS::AccountId}:application/${QBusinessApp}'
+
+          - Sid: QBusinessPluginDiscoveryPermissions
+            Effect: Allow
+            Action:
+              - qbusiness:ListPluginTypeMetadata
+              - qbusiness:ListPluginTypeActions
+            Resource: "*"
+
+          - Sid: QBusinessRetrieverPermission
+            Effect: Allow
+            Action:
+              - qbusiness:GetRetriever
+            Resource:
+              - !Sub 'arn:aws:qbusiness:${AWS::Region}:${AWS::AccountId}:application/${QBusinessApp}'
+              - !Sub 'arn:aws:qbusiness:${AWS::Region}:${AWS::AccountId}:application/${QBusinessApp}/retriever/*'
+
+          - Sid: QAppsResourceAgnosticPermissions
+            Effect: Allow
+            Action:
+              - qapps:CreateQApp
+              - qapps:PredictQApp
+              - qapps:PredictProblemStatementFromConversation
+              - qapps:PredictQAppFromProblemStatement
+              - qapps:ListQApps
+              - qapps:ListLibraryItems
+              - qapps:CreateSubscriptionToken
+              - qapps:ListCategories
+            Resource: !Sub 'arn:aws:qbusiness:${AWS::Region}:${AWS::AccountId}:application/${QBusinessApp}'
+
+          - Sid: QAppsAppUniversalPermissions
+            Effect: Allow
+            Action:
+              - qapps:DisassociateQAppFromUser
+            Resource: !Sub 'arn:aws:qapps:${AWS::Region}:${AWS::AccountId}:application/${QBusinessApp}/qapp/*'
+
+          - Sid: QAppsAppOwnerPermissions
+            Effect: Allow
+            Action:
+              - qapps:GetQApp
+              - qapps:CopyQApp
+              - qapps:UpdateQApp
+              - qapps:DeleteQApp
+              - qapps:ImportDocument
+              - qapps:ImportDocumentToQApp
+              - qapps:CreateLibraryItem
+              - qapps:UpdateLibraryItem
+              - qapps:StartQAppSession
+              - qapps:DescribeQAppPermissions
+              - qapps:UpdateQAppPermissions
+              - qapps:CreatePresignedUrl
+            Resource: !Sub 'arn:aws:qapps:${AWS::Region}:${AWS::AccountId}:application/${QBusinessApp}/qapp/*'
+            Condition:
+              StringEqualsIgnoreCase:
+                qapps:UserIsAppOwner: 'true'
+
+          - Sid: QAppsPublishedAppPermissions
+            Effect: Allow
+            Action:
+              - qapps:GetQApp
+              - qapps:CopyQApp
+              - qapps:AssociateQAppWithUser
+              - qapps:GetLibraryItem
+              - qapps:CreateLibraryItemReview
+              - qapps:AssociateLibraryItemReview
+              - qapps:DisassociateLibraryItemReview
+              - qapps:StartQAppSession
+              - qapps:DescribeQAppPermissions
+            Resource: !Sub 'arn:aws:qapps:${AWS::Region}:${AWS::AccountId}:application/${QBusinessApp}/qapp/*'
+            Condition:
+              StringEqualsIgnoreCase:
+                qapps:AppIsPublished: 'true'
+
+          - Sid: QAppsAppSessionModeratorPermissions
+            Effect: Allow
+            Action:
+              - qapps:ImportDocument
+              - qapps:ImportDocumentToQAppSession
+              - qapps:GetQAppSession
+              - qapps:GetQAppSessionMetadata
+              - qapps:UpdateQAppSession
+              - qapps:UpdateQAppSessionMetadata
+              - qapps:StopQAppSession
+              - qapps:ListQAppSessionData
+              - qapps:ExportQAppSessionData
+              - qapps:CreatePresignedUrl
+            Resource: !Sub 'arn:aws:qapps:${AWS::Region}:${AWS::AccountId}:application/${QBusinessApp}/qapp/*/session/*'
+            Condition:
+              StringEqualsIgnoreCase:
+                qapps:UserIsSessionModerator: 'true'
+
+
+  # create web experience
+  QBusinessWebExperience:
+    Type: AWS::QBusiness::WebExperience
+    Properties:
+      ApplicationId: !Ref QBusinessApp
+      Title: "AmazonQBusinessWebExperience"
+      RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/QBusiness-WebExperience-demo
