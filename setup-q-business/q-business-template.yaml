@@ -24,6 +24,13 @@ Resources:
       AWSServiceName: qbusiness.amazonaws.com
       Description: Service Linked Role for Q Business
 
+  # QBusiness Service Linked role for qapps
+  QBusinessSLRForQApps:
+    Type: AWS::IAM::ServiceLinkedRole
+    Properties:
+      AWSServiceName: qapps.amazonaws.com
+      Description: Service Linked Role for Q Business QApps
+
   # Q Business Application
   QBusinessApp:
     Type: AWS::QBusiness::Application
@@ -40,6 +47,7 @@ Resources:
         PersonalizationControlMode: ENABLED
     DependsOn:
       - QBusinessSLR
+      - QBusinessSLRForQApps
 
   ApplicationAssignment:
     Type: AWS::SSO::ApplicationAssignment
@@ -198,3 +206,30 @@ Resources:
       ApplicationId: !Ref QBusinessApp
       Title: "AmazonQBusinessWebExperience"
       RoleArn: !Sub arn:aws:iam::${AWS::AccountId}:role/QBusiness-WebExperience-demo
+
+  # create an index
+  QBusinessIndex:
+    Type: AWS::QBusiness::Index
+    Properties:
+      ApplicationId: !Ref QBusinessApp
+      CapacityConfiguration:
+        Units: 1
+      Description: QBusinessIndex
+      DisplayName: "AmazonQBusinessIndex"
+      Type: ENTERPRISE
+
+  # create a retriever
+  QBusinessRetriever:
+    Type: AWS::QBusiness::Retriever
+    Properties:
+      ApplicationId: !Ref QBusinessApp
+      Configuration:
+        NativeIndexConfiguration:
+          IndexId: !GetAtt QBusinessIndex.IndexId
+      DisplayName: QBusinessRetriever
+      Type: NATIVE_INDEX
+
+Outputs:
+  IdentityStoreId:
+    Value: !GetAtt SSOInstance.IdentityStoreId
+    Description: Identity Store Id for Q Business
