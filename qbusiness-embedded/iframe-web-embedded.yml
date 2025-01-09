@@ -1,0 +1,303 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template to create an AWS Amplify app with embedded Q Business widget - from https://aws.amazon.com/blogs/machine-learning/add-a-generative-ai-experience-to-your-website-or-web-application-with-amazon-q-embedded/
+
+Parameters:
+  AppName:
+    Type: String
+    Description: Name for the sample web page that will contain Q Business widget.
+    MaxLength: 30
+  QBizAppid:
+    Type: String
+    Description: Your Q Business Application ID (########-####-####-####-############).
+    MaxLength: 36
+    AllowedPattern: ^$|^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$
+    ConstraintDescription: Must be a valid Q Business Application ID.
+    Default: ''
+
+Metadata: 
+  AWS::CloudFormation::Interface: 
+    ParameterGroups: 
+      - 
+        Label: 
+          default: "Q Business Embeddable Widget Demonstration"
+        Parameters: 
+          - AppName
+          - QBizAppid
+    ParameterLabels: 
+      AppName:
+        default: "Web Page Name"
+      QBizAppid:
+        default: "Q Business Application ID, this can be found in the Q Business console."
+
+Resources:
+  AmplifyApp:
+    Type: AWS::Amplify::App
+    Properties:
+      Name: !Ref AppName
+      CustomRules:
+        - Source: </^[^.]+$|\\.(?!(css|gif|ico|jpg|js|png|txt|svg|woff|ttf|map|json)$)([^.]+$)/
+          Target: /index.html
+          Status: '200'
+      EnableBranchAutoDeletion: true
+      Platform: WEB
+
+  AmplifyBranch:
+    Type: AWS::Amplify::Branch
+    Properties:
+      AppId: !GetAtt AmplifyApp.AppId
+      BranchName: main
+      EnableAutoBuild: false
+      Stage: PRODUCTION
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W35
+            reason: "S3 is used to stage the newly created HTML file, before deploying to Amplify."
+          - id: W41
+            reason: "No sensitive information is written to S3, only a simple HTML file with an iFrame pointing to your Q Business"        
+    Properties:
+      BucketName: !Sub qbusiness-embeddable-amplify-deployment-${AWS::AccountId}-${AWS::Region}
+      OwnershipControls: 
+        Rules:
+          - ObjectOwnership: ObjectWriter
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - amplify.amazonaws.com
+                - s3.amazonaws.com
+            Action:
+              - s3:GetBucketLocation
+              - s3:ListBucket
+              - s3:GetObject
+              - s3:PutObject
+              - s3:PutObjectAcl
+            Resource:
+              - !GetAtt S3Bucket.Arn
+              - !Sub ${S3Bucket.Arn}/*
+
+  HTMLDeploymentFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "This is inline python code that gets executed when the cloudformation template is ran."
+          - id: W92
+            reason: "This is inline python code that gets executed when the cloudformation template is ran."    
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.8
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import os
+          import tempfile
+          import zipfile
+          import io
+          def handler(event, context):
+            if event['RequestType'] in ['Create', 'Update']:
+              try:
+                app_id = event['ResourceProperties']['AppId']
+                branch_name = event['ResourceProperties']['BranchName']
+                bucket_name = event['ResourceProperties']['BucketName']
+                app_name = event['ResourceProperties']['AppName']
+                qBiz_appid = event['ResourceProperties']['QBizAppid']
+                s3 = boto3.client('s3')
+                amplify = boto3.client('amplify')
+                if len(qBiz_appid):
+                  qBizclient = boto3.client('qbusiness')
+                  # Get the Q Business Endpoint
+                  response = qBizclient.list_web_experiences(applicationId = qBiz_appid)
+                  if len(response['webExperiences']) > 0:
+                    qBizEndPoint = response['webExperiences'][0]['defaultEndpoint']
+                  else:
+                    qBizEndPoint = "https://docs.aws.amazon.com/amazonq/latest/qbusiness-ug/what-is.html"
+                html_content = f"""
+                <!DOCTYPE html>
+                <html lang="en">
+                <head>
+                    <meta charset="UTF-8">
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>{app_name}</title>
+                </head>
+                <body>
+                    <h1>Welcome to {app_name}</h1>
+                    <p>This webpage demonstrates how Q Business can be embeded</p>
+                    <p>into your web pages.</p>
+                    <a href="https://docs.aws.amazon.com/amazonq/latest/qbusiness-ug/embed-amazon-q-business.html">Embedded Q Documentation</a>
+                    <br>
+                    <div style="position: absolute; width: 800px;height: 600px; right: 10%;bottom: 10%; z-index: 2;border: 1px solid #ccc; overflow: hidden;">
+                      <iframe src="{qBizEndPoint}" style="width: 100%; height: 100%;border: none;"></iframe>
+                    </div>
+                </body>
+                </html>
+                """
+                # Create a zip file in memory
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'a', zipfile.ZIP_DEFLATED, False) as zip_file:
+                    zip_file.writestr('index.html', html_content)
+                zip_buffer.seek(0)
+                # Upload zipped HTML to S3
+                s3.put_object(Bucket=bucket_name, Key='site.zip', Body=zip_buffer.getvalue(), ContentType='application/zip', ACL='bucket-owner-full-control')
+                # Get the S3 URL
+                s3_url = f's3://{bucket_name}/site.zip'
+                # Start the deployment
+                amplify.start_deployment(appId=app_id, branchName=branch_name, sourceUrl=s3_url)
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, {"QBizEndPoint": qBizEndPoint})
+              except Exception as e:
+                cfnresponse.send(event, context, cfnresponse.FAILED, {})
+            else:
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AmplifyDeploymentPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - amplify:StartDeployment
+                Resource: !Sub arn:aws:amplify:${AWS::Region}:${AWS::AccountId}:apps/${AmplifyApp.AppId}/*
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:GetObjectAcl
+                  - s3:PutObjectAcl
+                Resource:
+                  - !Sub arn:aws:s3:::${S3Bucket}
+                  - !Sub arn:aws:s3:::${S3Bucket}/*
+              - Effect: Allow
+                Action:
+                  - qbusiness:ListWebExperiences
+                Resource: !Sub arn:aws:qbusiness:${AWS::Region}:${AWS::AccountId}:application/${QBizAppid}                  
+
+  S3BucketCleanup:
+    Type: Custom::S3BucketCleanup
+    DependsOn: HTMLDeployment
+    Properties:
+      ServiceToken: !GetAtt S3CleanupFunction.Arn
+      BucketName: !Ref S3Bucket
+
+  S3CleanupFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "This is inline python code that gets executed when the cloudformation template is ran."
+          - id: W92
+            reason: "This is inline python code that gets executed when the cloudformation template is ran."        
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt S3CleanupRole.Arn
+      Runtime: python3.8
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          import time
+          
+          def delete_bucket_contents(bucket_name):
+              s3 = boto3.resource('s3')
+              bucket = s3.Bucket(bucket_name)
+              print(f"Deleting contents of {bucket_name}")
+              bucket.objects.all().delete()
+          
+          def handler(event, context):
+              print("Entry point into S3 Cleanup Lambda")
+              if event['RequestType'] == 'Delete':
+                  bucket_name = event['ResourceProperties']['BucketName']
+                  max_retries = 2
+                  retry_delay = 5
+                  
+                  for attempt in range(max_retries):
+                      print(f"Attempt {attempt + 1} of {max_retries}")
+                      try:
+                          delete_bucket_contents(bucket_name)
+                          break
+                      except Exception as e:
+                          if attempt == max_retries - 1:
+                              print(f"Failed to delete bucket contents after {max_retries} attempts: {str(e)}")
+                              cfnresponse.send(event, context, cfnresponse.FAILED, {})
+                              return
+                          time.sleep(retry_delay)
+              print("Delete bucket")
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+
+  S3CleanupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3BucketCleanupPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                  - s3:GetBucketVersioning
+                Resource:
+                  - !GetAtt S3Bucket.Arn
+                  - !Sub ${S3Bucket.Arn}/*
+
+
+  HTMLDeployment:
+    Type: Custom::HTMLDeployment
+    Properties:
+      ServiceToken: !GetAtt HTMLDeploymentFunction.Arn
+      AppId: !GetAtt AmplifyApp.AppId
+      BranchName: main
+      BucketName: !Ref S3Bucket
+      AppName: !Ref AppName
+      QBizAppid: !Ref QBizAppid
+
+
+
+
+Outputs:
+  AmplifyAppUrl:
+    Description: Navigate to Q Business console, select Embed Amazon Q Business from left panel and add this URL as an allowed website. Upon completion, open this URL in your browser.
+    Value: !Sub https://main.${AmplifyApp.DefaultDomain}
+  iFrameCode:
+    Description: For information puporses, you can also use this HTML code to include an iFrame that links to your Q Business Application in your own Web.
+    Value: !Sub '<iframe src="${HTMLDeployment.QBizEndPoint}"></iframe>'
